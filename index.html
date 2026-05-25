@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skatteetaten 2026 Bidirectional Tax Engine</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f7fafc;
+            padding: 40px;
+            display: flex;
+            justify-content: center;
+        }
+        .app-box {
+            max-width: 650px;
+            width: 100%;
+            background: #ffffff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+        h2 { margin-top: 0; color: #1a202c; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; }
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #edf2f7; }
+        .tab { padding: 10px 20px; cursor: pointer; font-weight: bold; color: #718096; }
+        .tab.active { color: #2b6cb0; border-bottom: 2px solid #2b6cb0; margin-bottom: -2px; }
+        .input-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 6px; font-weight: bold; color: #4a5568; }
+        select, input { width: 100%; padding: 12px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 16px; box-sizing: border-box; }
+        button { width: 100%; padding: 14px; background-color: #2b6cb0; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        button:hover { background-color: #2c5282; }
+        .output-panel { margin-top: 25px; padding: 20px; background-color: #ebf8ff; border-radius: 6px; display: none; border-left: 4px solid #2b6cb0; }
+        .row { display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 16px; }
+        .bold { font-weight: bold; border-top: 1px solid #bee3f8; padding-top: 12px; margin-bottom: 0; }
+    </style>
+</head>
+<body>
+
+<div class="app-box">
+    <h2>Norwegian Tax Table Engine (2026 Rules)</h2>
+    
+    <div class="tabs">
+        <div class="tab active" id="forwardTab" onclick="setMode('FORWARD')">Calculate Tax from Gross</div>
+        <div class="tab" id="reverseTab" onclick="setMode('REVERSE')">Reverse Calculate Gross from Net</div>
+    </div>
+    
+    <div class="input-group">
+        <label for="tableSelector">Table Number (Tabellnummer)</label>
+        <select id="tableSelector">
+            <option value="7100">7100 (Standard Employment - Class 1)</option>
+            <option value="7101">7101 (With Secondary Allowances)</option>
+            <option value="8340">8340 (Non-Resident High-Earning Framework)</option>
+        </select>
+    </div>
+
+    <div class="input-group">
+        <label for="periodType">Pay Period (Lønnsperiode)</label>
+        <select id="periodType">
+            <option value="MONTHLY">Monthly (Månedslønn)</option>
+            <option value="FORTNIGHTLY">14 Days (14-dagers lønn)</option>
+            <option value="WEEKLY">Weekly (Ukelønn)</option>
+        </select>
+    </div>
+
+    <div class="input-group">
+        <label id="valueLabel" for="amountInput">Gross Income (Bruttolønn) - NOK</label>
+        <input type="number" id="amountInput" placeholder="e.g. 80000" min="0">
+    </div>
+
+    <button onclick="executeEngineCalculation()">Run Simulation Engine</button>
+
+    <div class="output-panel" id="outputPanel">
+        <div class="row"><span>Target Calculation Basis:</span><span id="outBasis" style="font-weight: bold;">0 NOK</span></div>
+        <div class="row"><span>Calculated Gross Income:</span><span id="outGross">0 NOK</span></div>
+        <div class="row"><span>Withholding Tax Deduction:</span><span id="outTax" style="color: #c53030; font-weight: bold;">0 NOK</span></div>
+        <div class="row bold"><span>Calculated Net Pay:</span><span id="outNet" style="color: #2f855a;">0 NOK</span></div>
+    </div>
+</div>
+
+<script>
+    let currentMode = 'FORWARD';
+
+    const CONFIG_2026 = {
+        FLAT_BASE_TAX_RATE: 0.22,
+        TRYGDEAVGIFT_RATE: 0.078,
+        MINSTEFRADRAG_PERC: 0.46,
+        MINSTEFRADRAG_MAX_ANNUAL: 104450,
+        PERSONFRADRAG_ANNUAL: 58250,
+        HIGH_EARNER_THRESHOLD: 1467200,
+        brackets: [
+            { limit: 208050, rate: 0.000 },
+            { limit: 292850, rate: 0.017 },
+            { limit: 670150, rate: 0.040 },
+            { limit: 937900, rate: 0.137 },
+            { limit: 1467200, rate: 0.168 },
+            { limit: Infinity, rate: 0.178 }
+        ]
+    };
+
+    function setMode(mode) {
+        currentMode = mode;
+        document.getElementById('forwardTab').classList.toggle('active', mode === 'FORWARD');
+        document.getElementById('reverseTab').classList.toggle('active', mode === 'REVERSE');
+        document.getElementById('valueLabel').innerText = mode === 'FORWARD' 
+            ? "Gross Income (Bruttolønn) - NOK" 
+            : "Desired Net Income (Nettolønn) - NOK";
+    }
+
+    // Direct translation of the core Java "Trekkrutine.beregnTabelltrekk" rule pattern
+    function calculateForwardTax(grossAmount, tableId, period) {
+        let roundedGross = Math.floor(grossAmount / 10) * 10; 
+        let annualFactor = period === "MONTHLY" ? 12 : period === "FORTNIGHTLY" ? 26 : 52;
+        let annualizedGross = roundedGross * annualFactor;
+
+        let minstefradrag = annualizedGross * CONFIG_2026.MINSTEFRADRAG_PERC;
+        if (minstefradrag > CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL) {
+            minstefradrag = CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL;
+        }
+
+        let taxableBase = annualizedGross - minstefradrag - CONFIG_2026.PERSONFRADRAG_ANNUAL;
+        if (tableId === "7101") taxableBase -= 4000; 
+        if (taxableBase < 0) taxableBase = 0;
+
+        let baseTax = taxableBase * CONFIG_2026.FLAT_BASE_TAX_RATE;
+        let socialSec = annualizedGross * CONFIG_2026.TRYGDEAVGIFT_RATE;
+
+        let bracketTax = 0;
+        let previousLimit = 0;
+        for (let i = 0; i < CONFIG_2026.brackets.length; i++) {
+            let current = CONFIG_2026.brackets[i];
+            if (annualizedGross > current.limit) {
+                bracketTax += (current.limit - previousLimit) * current.rate;
+                previousLimit = current.limit;
+            } else {
+                bracketTax += (annualizedGross - previousLimit) * current.rate;
+                break;
+            }
+        }
+
+        let totalAnnualTax = baseTax + socialSec + bracketTax;
+
+        if (annualizedGross > CONFIG_2026.HIGH_EARNER_THRESHOLD) {
+            let excessOverThreshold = annualizedGross - CONFIG_2026.HIGH_EARNER_THRESHOLD;
+            let approximateExcessRate = tableId === "8340" ? 0.47 : 0.43;
+            let baselineMaxTax = totalAnnualTax - (excessOverThreshold * CONFIG_2026.brackets[5].rate);
+            totalAnnualTax = baselineMaxTax + (excessOverThreshold * approximateExcessRate);
+        }
+
+        let finalTaxDeduction = Math.round(totalAnnualTax / annualFactor);
+        return finalTaxDeduction > grossAmount ? grossAmount : finalTaxDeduction;
+    }
+
+    // High-precision Goal Seek Engine to reverse calculate Gross from Net
+    function reverseCalculateGross(targetNet, tableId, period) {
+        let lowGross = targetNet;
+        let highGross = targetNet * 3; // Establish upper bound search threshold
+        let calculatedGross = targetNet;
+        let tolerance = 0.1; 
+        let maxIterations = 100;
+
+        for (let i = 0; i < maxIterations; i++) {
+            calculatedGross = (lowGross + highGross) / 2;
+            let currentTax = calculateForwardTax(calculatedGross, tableId, period);
+            let currentNet = calculatedGross - currentTax;
+
+            if (Math.abs(currentNet - targetNet) < tolerance) {
+                break;
+            }
+
+            if (currentNet < targetNet) {
+                lowGross = calculatedGross;
+            } else {
+                highGross = calculatedGross;
+            }
+        }
+        return Math.round(calculatedGross);
+    }
+
+    function executeEngineCalculation() {
+        const tableId = document.getElementById('tableSelector').value;
+        const period = document.getElementById('periodType').value;
+        const inputAmount = parseFloat(document.getElementById('amountInput').value);
+
+        if (isNaN(inputAmount) || inputAmount < 0) {
+            alert("Please enter a valid numeric value.");
+            return;
+        }
+
+        let finalGross = 0;
+        let finalTax = 0;
+        let finalNet = 0;
+
+        if (currentMode === 'FORWARD') {
+            finalGross = inputAmount;
+            finalTax = calculateForwardTax(finalGross, tableId, period);
+            finalNet = finalGross - finalTax;
+        } else {
+            finalNet = inputAmount;
+            finalGross = reverseCalculateGross(finalNet, tableId, period);
+            finalTax = calculateForwardTax(finalGross, tableId, period);
+        }
+
+        // Output fields to browser UI
+        document.getElementById('outBasis').innerText = inputAmount.toLocaleString('no-NO') + " NOK";
+        document.getElementById('outGross').innerText = finalGross.toLocaleString('no-NO') + " NOK";
+        document.getElementById('outTax').innerText = finalTax.toLocaleString('no-NO') + " NOK";
+        document.getElementById('outNet').innerText = finalNet.toLocaleString('no-NO') + " NOK";
+        document.getElementById('outputPanel').style.display = 'block';
+    }
+</script>
+
+</body>
+</html>
