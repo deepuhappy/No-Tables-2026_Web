@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Skatteetaten 2026 Bidirectional Tax Engine</title>
+    <title>Skatteetaten 2026 Comprehensive Engine</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -37,7 +37,7 @@
 <body>
 
 <div class="app-box">
-    <h2>Norwegian Tax Table Engine (2026 Rules)</h2>
+    <h2>Official Norwegian Tax Engine (2026 Rules)</h2>
     
     <div class="tabs">
         <div class="tab active" id="forwardTab" onclick="setMode('FORWARD')">Calculate Tax from Gross</div>
@@ -47,14 +47,12 @@
     <div class="input-group">
         <label for="tableSelector">Table Number (Tabellnummer)</label>
         <select id="tableSelector">
-            <option value="7100">7100 (Standard Primary Employment - Class 1)</option>
-            <option value="7101">7101 (Standard with Secondary Premium Allowances)</option>
-            <option value="7102">7102 (Standard with Secondary Standard Allowances)</option>
-            <option value="7103">7103 (Standard with Combined Expense Offsets)</option>
-            <option value="7200">7200 (Single Parents / Class 2 Status)</option>
-            <option value="7300">7300 (Pensioners / Specialized Old-Age Status)</option>
-            <option value="8300">8300 (Non-Resident Standard Rate Class)</option>
-            <option value="8340">8340 (Non-Resident High-Earning / Pension Structure)</option>
+            <option value="8000">8000 (Standard Employment - 0 Allowance)</option>
+            <option value="8010">8010 (Standard Employment - 10k Allowance)</option>
+            <option value="8020">8020 (Standard Employment - 20k Allowance)</option>
+            <option value="7100">7100 (Backend Core Standard)</option>
+            <option value="7101">7101 (Backend Core Secondary Premium)</option>
+            <option value="8340">8340 (Non-Resident High-Earning / Pension)</option>
         </select>
     </div>
 
@@ -69,7 +67,7 @@
 
     <div class="input-group">
         <label id="valueLabel" for="amountInput">Gross Income (Bruttolønn) - NOK</label>
-        <input type="number" id="amountInput" placeholder="e.g. 85000" min="0">
+        <input type="number" id="amountInput" placeholder="e.g. 75000" min="0">
     </div>
 
     <button onclick="executeEngineCalculation()">Run Simulation Engine</button>
@@ -85,11 +83,9 @@
 <script>
     let currentMode = 'FORWARD';
 
-    // 2026 Legal Parameters derived directly from Skatteetaten's Konstanter.java
     const CONFIG_2026 = {
         FLAT_BASE_TAX_RATE: 0.22,
         TRYGDEAVGIFT_RATE: 0.078,
-        PENSION_TRYGDEAVGIFT_RATE: 0.051, // Used specifically for Table 7300 / 8340 pension variations
         MINSTEFRADRAG_PERC: 0.46,
         MINSTEFRADRAG_MAX_ANNUAL: 104450,
         PERSONFRADRAG_ANNUAL: 58250,
@@ -113,38 +109,43 @@
             : "Desired Net Income (Nettolønn) - NOK";
     }
 
-    // Direct translation of the backend core Java calculation loop "Trekkrutine.beregnTabelltrekk"
+    // Resolves public card numbers to their core code equivalents and extra allowances
+    function resolveTableConfiguration(tableInput) {
+        let baseTable = tableInput;
+        let extraAllowance = 0;
+
+        // If it starts with 8 and is a 4-digit number (e.g., 8000, 8020)
+        if (tableInput.startsWith('8') && tableInput.length === 4 && tableInput !== "8340") {
+            baseTable = "7100"; // Maps straight back to core class rules
+            let allowanceTokens = parseInt(tableInput.substring(1)); // Extract last 3 digits
+            extraAllowance = allowanceTokens * 1000; // e.g., 020 becomes 20,000 NOK annual allowance
+        }
+
+        return { baseTable, extraAllowance };
+    }
+
     function calculateForwardTax(grossAmount, tableId, period) {
         let roundedGross = Math.floor(grossAmount / 10) * 10; 
         let annualFactor = period === "MONTHLY" ? 12 : period === "FORTNIGHTLY" ? 26 : 52;
         let annualizedGross = roundedGross * annualFactor;
 
-        // 1. Calculate Minimum Deduction (Minstefradrag)
+        // Fetch translation structure 
+        const config = resolveTableConfiguration(tableId);
+
         let minstefradrag = annualizedGross * CONFIG_2026.MINSTEFRADRAG_PERC;
         if (minstefradrag > CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL) {
             minstefradrag = CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL;
         }
 
-        // 2. Base Taxable Income (Alminnelig Inntekt) incorporating table-specific structural deductions
-        let taxableBase = annualizedGross - minstefradrag - CONFIG_2026.PERSONFRADRAG_ANNUAL;
+        // Apply Personal Allowance and any dynamic embedded table allowances resolved above
+        let taxableBase = annualizedGross - minstefradrag - CONFIG_2026.PERSONFRADRAG_ANNUAL - config.extraAllowance;
         
-        // Handle specific table allowance configurations mapping the Java repo rule sets
-        if (tableId === "7101") taxableBase -= 4000;
-        if (tableId === "7102") taxableBase -= 8000;
-        if (tableId === "7103") taxableBase -= 12000;
-        if (tableId === "7200") taxableBase -= 24000; // Single parent standard top-up offset
-        
+        if (config.baseTable === "7101") taxableBase -= 4000;
         if (taxableBase < 0) taxableBase = 0;
 
         let baseTax = taxableBase * CONFIG_2026.FLAT_BASE_TAX_RATE;
+        let socialSec = annualizedGross * CONFIG_2026.TRYGDEAVGIFT_RATE;
 
-        // 3. Select corresponding social security premium (Trygdeavgift) rate
-        let activeTrygdeRate = (tableId === "7300" || tableId === "8340") 
-            ? CONFIG_2026.PENSION_TRYGDEAVGIFT_RATE 
-            : CONFIG_2026.TRYGDEAVGIFT_RATE;
-        let socialSec = annualizedGross * activeTrygdeRate;
-
-        // 4. Bracket Tax Component (Trinnskatt) progressive processing loop
         let bracketTax = 0;
         let previousLimit = 0;
         for (let i = 0; i < CONFIG_2026.brackets.length; i++) {
@@ -160,11 +161,9 @@
 
         let totalAnnualTax = baseTax + socialSec + bracketTax;
 
-        // 2026 REMOVAL OF 99,800 CAP: Continuous progression runs natively.
-        // Legacy "finnOverskytendeProsentForTabell" approximation applies strictly above 1,467,200 NOK threshold.
         if (annualizedGross > CONFIG_2026.HIGH_EARNER_THRESHOLD) {
             let excessOverThreshold = annualizedGross - CONFIG_2026.HIGH_EARNER_THRESHOLD;
-            let approximateExcessRate = (tableId === "8340" || tableId === "8300") ? 0.47 : 0.43;
+            let approximateExcessRate = config.baseTable === "8340" ? 0.47 : 0.43;
             let baselineMaxTax = totalAnnualTax - (excessOverThreshold * CONFIG_2026.brackets[5].rate);
             totalAnnualTax = baselineMaxTax + (excessOverThreshold * approximateExcessRate);
         }
@@ -173,10 +172,9 @@
         return finalTaxDeduction > grossAmount ? grossAmount : finalTaxDeduction;
     }
 
-    // High-Precision Goal Seek Search Engine for Net-to-Gross Reverse Mapping
     function reverseCalculateGross(targetNet, tableId, period) {
         let lowGross = targetNet;
-        let highGross = targetNet * 4; // Establish high-bound scanning perimeter for high earners
+        let highGross = targetNet * 4; 
         let calculatedGross = targetNet;
         let tolerance = 0.05; 
         let maxIterations = 80;
@@ -191,9 +189,9 @@
             }
 
             if (currentNet < targetNet) {
-                lowGross = calculatedGross; // Guess was too low, lift bottom bound
+                lowGross = calculatedGross;
             } else {
-                highGross = calculatedGross; // Guess was too high, drop top bound
+                highGross = calculatedGross;
             }
         }
         return Math.round(calculatedGross);
@@ -223,7 +221,6 @@
             finalTax = calculateForwardTax(finalGross, tableId, period);
         }
 
-        // Render calculations securely to browser UI output grid
         document.getElementById('outBasis').innerText = inputAmount.toLocaleString('no-NO') + " NOK";
         document.getElementById('outGross').innerText = finalGross.toLocaleString('no-NO') + " NOK";
         document.getElementById('outTax').innerText = finalTax.toLocaleString('no-NO') + " NOK";
