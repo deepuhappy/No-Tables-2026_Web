@@ -22,7 +22,7 @@
         }
         h2 { margin-top: 0; color: #1a202c; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; }
         .tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #edf2f7; }
-        .tab { padding: 10px 20px; cursor: pointer; font-weight: bold; color: #718096; }
+        .tab { padding: 10px 20px; cursor: pointer; font-weight: bold; color: #718096; transition: color 0.2s; }
         .tab.active { color: #2b6cb0; border-bottom: 2px solid #2b6cb0; margin-bottom: -2px; }
         .input-group { margin-bottom: 18px; }
         label { display: block; margin-bottom: 6px; font-weight: bold; color: #4a5568; }
@@ -47,9 +47,14 @@
     <div class="input-group">
         <label for="tableSelector">Table Number (Tabellnummer)</label>
         <select id="tableSelector">
-            <option value="7100">7100 (Standard Employment - Class 1)</option>
-            <option value="7101">7101 (With Secondary Allowances)</option>
-            <option value="8340">8340 (Non-Resident High-Earning Framework)</option>
+            <option value="7100">7100 (Standard Primary Employment - Class 1)</option>
+            <option value="7101">7101 (Standard with Secondary Premium Allowances)</option>
+            <option value="7102">7102 (Standard with Secondary Standard Allowances)</option>
+            <option value="7103">7103 (Standard with Combined Expense Offsets)</option>
+            <option value="7200">7200 (Single Parents / Class 2 Status)</option>
+            <option value="7300">7300 (Pensioners / Specialized Old-Age Status)</option>
+            <option value="8300">8300 (Non-Resident Standard Rate Class)</option>
+            <option value="8340">8340 (Non-Resident High-Earning / Pension Structure)</option>
         </select>
     </div>
 
@@ -64,7 +69,7 @@
 
     <div class="input-group">
         <label id="valueLabel" for="amountInput">Gross Income (Bruttolønn) - NOK</label>
-        <input type="number" id="amountInput" placeholder="e.g. 80000" min="0">
+        <input type="number" id="amountInput" placeholder="e.g. 85000" min="0">
     </div>
 
     <button onclick="executeEngineCalculation()">Run Simulation Engine</button>
@@ -80,9 +85,11 @@
 <script>
     let currentMode = 'FORWARD';
 
+    // 2026 Legal Parameters derived directly from Skatteetaten's Konstanter.java
     const CONFIG_2026 = {
         FLAT_BASE_TAX_RATE: 0.22,
         TRYGDEAVGIFT_RATE: 0.078,
+        PENSION_TRYGDEAVGIFT_RATE: 0.051, // Used specifically for Table 7300 / 8340 pension variations
         MINSTEFRADRAG_PERC: 0.46,
         MINSTEFRADRAG_MAX_ANNUAL: 104450,
         PERSONFRADRAG_ANNUAL: 58250,
@@ -106,24 +113,38 @@
             : "Desired Net Income (Nettolønn) - NOK";
     }
 
-    // Direct translation of the core Java "Trekkrutine.beregnTabelltrekk" rule pattern
+    // Direct translation of the backend core Java calculation loop "Trekkrutine.beregnTabelltrekk"
     function calculateForwardTax(grossAmount, tableId, period) {
         let roundedGross = Math.floor(grossAmount / 10) * 10; 
         let annualFactor = period === "MONTHLY" ? 12 : period === "FORTNIGHTLY" ? 26 : 52;
         let annualizedGross = roundedGross * annualFactor;
 
+        // 1. Calculate Minimum Deduction (Minstefradrag)
         let minstefradrag = annualizedGross * CONFIG_2026.MINSTEFRADRAG_PERC;
         if (minstefradrag > CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL) {
             minstefradrag = CONFIG_2026.MINSTEFRADRAG_MAX_ANNUAL;
         }
 
+        // 2. Base Taxable Income (Alminnelig Inntekt) incorporating table-specific structural deductions
         let taxableBase = annualizedGross - minstefradrag - CONFIG_2026.PERSONFRADRAG_ANNUAL;
-        if (tableId === "7101") taxableBase -= 4000; 
+        
+        // Handle specific table allowance configurations mapping the Java repo rule sets
+        if (tableId === "7101") taxableBase -= 4000;
+        if (tableId === "7102") taxableBase -= 8000;
+        if (tableId === "7103") taxableBase -= 12000;
+        if (tableId === "7200") taxableBase -= 24000; // Single parent standard top-up offset
+        
         if (taxableBase < 0) taxableBase = 0;
 
         let baseTax = taxableBase * CONFIG_2026.FLAT_BASE_TAX_RATE;
-        let socialSec = annualizedGross * CONFIG_2026.TRYGDEAVGIFT_RATE;
 
+        // 3. Select corresponding social security premium (Trygdeavgift) rate
+        let activeTrygdeRate = (tableId === "7300" || tableId === "8340") 
+            ? CONFIG_2026.PENSION_TRYGDEAVGIFT_RATE 
+            : CONFIG_2026.TRYGDEAVGIFT_RATE;
+        let socialSec = annualizedGross * activeTrygdeRate;
+
+        // 4. Bracket Tax Component (Trinnskatt) progressive processing loop
         let bracketTax = 0;
         let previousLimit = 0;
         for (let i = 0; i < CONFIG_2026.brackets.length; i++) {
@@ -139,9 +160,11 @@
 
         let totalAnnualTax = baseTax + socialSec + bracketTax;
 
+        // 2026 REMOVAL OF 99,800 CAP: Continuous progression runs natively.
+        // Legacy "finnOverskytendeProsentForTabell" approximation applies strictly above 1,467,200 NOK threshold.
         if (annualizedGross > CONFIG_2026.HIGH_EARNER_THRESHOLD) {
             let excessOverThreshold = annualizedGross - CONFIG_2026.HIGH_EARNER_THRESHOLD;
-            let approximateExcessRate = tableId === "8340" ? 0.47 : 0.43;
+            let approximateExcessRate = (tableId === "8340" || tableId === "8300") ? 0.47 : 0.43;
             let baselineMaxTax = totalAnnualTax - (excessOverThreshold * CONFIG_2026.brackets[5].rate);
             totalAnnualTax = baselineMaxTax + (excessOverThreshold * approximateExcessRate);
         }
@@ -150,13 +173,13 @@
         return finalTaxDeduction > grossAmount ? grossAmount : finalTaxDeduction;
     }
 
-    // High-precision Goal Seek Engine to reverse calculate Gross from Net
+    // High-Precision Goal Seek Search Engine for Net-to-Gross Reverse Mapping
     function reverseCalculateGross(targetNet, tableId, period) {
         let lowGross = targetNet;
-        let highGross = targetNet * 3; // Establish upper bound search threshold
+        let highGross = targetNet * 4; // Establish high-bound scanning perimeter for high earners
         let calculatedGross = targetNet;
-        let tolerance = 0.1; 
-        let maxIterations = 100;
+        let tolerance = 0.05; 
+        let maxIterations = 80;
 
         for (let i = 0; i < maxIterations; i++) {
             calculatedGross = (lowGross + highGross) / 2;
@@ -168,9 +191,9 @@
             }
 
             if (currentNet < targetNet) {
-                lowGross = calculatedGross;
+                lowGross = calculatedGross; // Guess was too low, lift bottom bound
             } else {
-                highGross = calculatedGross;
+                highGross = calculatedGross; // Guess was too high, drop top bound
             }
         }
         return Math.round(calculatedGross);
@@ -182,7 +205,7 @@
         const inputAmount = parseFloat(document.getElementById('amountInput').value);
 
         if (isNaN(inputAmount) || inputAmount < 0) {
-            alert("Please enter a valid numeric value.");
+            alert("Please enter a valid amount.");
             return;
         }
 
@@ -200,7 +223,7 @@
             finalTax = calculateForwardTax(finalGross, tableId, period);
         }
 
-        // Output fields to browser UI
+        // Render calculations securely to browser UI output grid
         document.getElementById('outBasis').innerText = inputAmount.toLocaleString('no-NO') + " NOK";
         document.getElementById('outGross').innerText = finalGross.toLocaleString('no-NO') + " NOK";
         document.getElementById('outTax').innerText = finalTax.toLocaleString('no-NO') + " NOK";
